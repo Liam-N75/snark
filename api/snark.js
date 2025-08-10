@@ -1,6 +1,6 @@
 // api/snark.js
 // Notion-aware quip bot using OpenRouter (chat/completions).
-// If OpenRouter fails, returns explicit error JSON (no canned lines).
+// Shows explicit errors (no canned fallbacks) and includes a stronger debug mode.
 //
 // ENV VARS (Vercel → Project → Settings → Environment Variables)
 //
@@ -11,15 +11,14 @@
 // - NOTION_DUE_PROP   = "Date"
 // - NOTION_CLASS_MAP  = "S-A:NYP_1,C-A:Conflict_of_Laws,E-A:Evidence,SC-A:State_and_Local_Tax,N-A:Supreme_Court_Watch"
 //   (underscores become spaces)
-//
 // OpenRouter (required to use LLM):
-// - OPENROUTER_API_KEY
-// - OPENROUTER_MODEL  (e.g., "openai/gpt-5")
-// Optional but nice to have for OpenRouter analytics:
-// - OPENROUTER_SITE_URL  (e.g., "https://your-app.vercel.app")
-// - OPENROUTER_APP_NAME  (e.g., "Daily Snark")
+// - OPENROUTER_API_KEY         (sk-or-v1-...)
+// - OPENROUTER_MODEL           (e.g., "openai/gpt-5" or another model id)
+// Optional (recommended by OpenRouter):
+// - OPENROUTER_SITE_URL        (e.g., "https://<your-app>.vercel.app")
+// - OPENROUTER_APP_NAME        (e.g., "Daily Snark")
 //
-// Debug: append ?debug=1 to see origin and errors.
+// Debug: append ?debug=1 to see origin, masked key presence, and errors.
 
 const NOTION_VERSION = "2022-06-28";
 const TIMEOUT_MS = 9000;
@@ -134,16 +133,13 @@ async function fetchContextFromNotion() {
 // ---------- OpenRouter call ----------
 async function callOpenRouter({ system, context }) {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  const model  = process.env.OPENROUTER_MODEL || "openai/gpt-5"; // your target
-  if (!apiKey) {
-    return { snark: null, error: "Missing OPENROUTER_API_KEY" };
-  }
+  const model  = process.env.OPENROUTER_MODEL || "openai/gpt-5";
+  if (!apiKey) return { snark: null, error: "Missing OPENROUTER_API_KEY" };
 
   const headers = {
     "Authorization": `Bearer ${apiKey}`,
     "Content-Type": "application/json",
   };
-
   // Optional analytics headers (recommended by OpenRouter)
   if (process.env.OPENROUTER_SITE_URL) headers["HTTP-Referer"] = process.env.OPENROUTER_SITE_URL;
   if (process.env.OPENROUTER_APP_NAME) headers["X-Title"] = process.env.OPENROUTER_APP_NAME;
@@ -172,7 +168,7 @@ async function callOpenRouter({ system, context }) {
     max_tokens: 40
   };
 
-  // 1 retry with tiny backoff
+  // 1 retry with small backoff
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -222,12 +218,16 @@ export default async function handler(req, res) {
       : `No pending items found or mapping empty.`;
 
     // Call OpenRouter (always try; show explicit error if it fails)
-    const { snark, error: orError } = await callOpenRouter({ system: "", context }); // system is in callOpenRouter()
+    const { snark, error: orError } = await callOpenRouter({
+      system: "", // system prompt is set inside callOpenRouter()
+      context
+    });
 
     // Edge caching to reduce RPM (10 minutes); tweak as you like
     res.setHeader("Cache-Control", "public, s-maxage=600, stale-while-revalidate=60");
 
     if (debug) {
+      const mask = v => (v ? `${v.slice(0,6)}…(len:${v.length})` : null);
       return res.status(snark ? 200 : 500).json({
         origin: snark ? "openrouter" : "error",
         openrouter_error: orError || null,
@@ -235,6 +235,9 @@ export default async function handler(req, res) {
         reason: ctx.reason,
         context_used: context,
         class_map: parseClassMap(),
+        // helpful env presence (masked so it’s safe to share)
+        has_OPENROUTER_API_KEY: !!process.env.OPENROUTER_API_KEY,
+        openrouter_api_key_sample: process.env.OPENROUTER_API_KEY ? mask(process.env.OPENROUTER_API_KEY) : null,
         snark: snark || null
       });
     }
@@ -256,4 +259,5 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: `Server error: ${String(e)}` });
   }
 }
+
 
