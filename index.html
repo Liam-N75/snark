@@ -6,41 +6,40 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark light" />
   <style>
-    html, body {
-      height: 100%;
-      margin: 0;
-      background: transparent !important; /* show Notion’s own background */
-    }
+    html, body { height:100%; margin:0; background:transparent !important; }
     body {
-      color: inherit; /* use Notion’s text color */
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif;
-      display: grid;
-      place-items: center;
-      padding: 0 8px;
+      color: inherit; font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif;
+      display: grid; place-items: center; padding: 0 8px;
     }
-    /* Pure text, no card, no border, so it blends perfectly */
-    .snark { font-size: 1.05rem; line-height: 1.45; text-wrap: pretty; }
+    .snark { font-size: 1.05rem; line-height: 1.45; text-wrap: pretty; text-align: center; }
   </style>
 </head>
 <body>
   <div id="snark" class="snark">Loading…</div>
 
   <script>
-    // Bust any caching so it updates every time you open Notion
-    const url = '/api/snark?t=' + Date.now();
-    fetch(url, { cache: 'no-store' })
-      .then(r => r.json())
+    const out = document.getElementById('snark');
+
+    // Abort if the API takes too long
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 6000);
+
+    fetch('/api/snark?t=' + Date.now(), { cache: 'no-store', signal: controller.signal })
+      .then(r => {
+        clearTimeout(t);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
       .then(data => {
-        document.getElementById('snark').textContent =
-          data.snark || "…no snark today? how productive.";
+        out.textContent = (data && data.snark) ? data.snark : "…no snark today? how productive.";
       })
       .catch(() => {
-        document.getElementById('snark').textContent =
-          "Snark failed to load. Assume it's judging.";
+        out.textContent = "Snark took a break. Consider it mercy.";
       });
   </script>
 </body>
 </html>
+
 
 
 
