@@ -4,29 +4,34 @@
   <meta charset="UTF-8" />
   <title>Daily Snark</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    :root { --accent:#ff5c5c; }
-    html,body { height:100%; margin:0; }
-    body {
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif;
-      background: #fafafa;
-      color: #2a2a2a;
-      display: grid;
-      place-items: center;
-    }
-    .card {
-      max-width: 420px;
-      width: calc(100% - 32px);
-      padding: 18px 16px;
-      background: #fff;
-      border-radius: 16px;
-      box-shadow: 0 6px 22px rgba(0,0,0,0.06);
-      border-left: 5px solid var(--accent);
-      line-height: 1.45;
-      font-size: 1.05rem;
-    }
-    .muted { color:#7a7a7a; font-size:.9rem; margin-top:.5rem; }
-  </style>
+ <style>
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: transparent;
+  }
+  body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif;
+    color: inherit; /* use Notion’s text color */
+    display: grid;
+    place-items: center;
+  }
+  .card {
+    max-width: 420px;
+    width: calc(100% - 32px);
+    padding: 12px 0;
+    background: transparent; /* let Notion's background show */
+    border-left: 3px solid #888; /* subtle grey line */
+    line-height: 1.45;
+    font-size: 1.05rem;
+  }
+  .muted {
+    opacity: 0.7;
+    font-size: 0.85rem;
+    margin-top: 0.3rem;
+  }
+</style>
+
 </head>
 <body>
   <div class="card">
@@ -49,3 +54,4 @@
   </script>
 </body>
 </html>
+
