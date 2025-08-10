@@ -28,9 +28,10 @@ export default async function handler(req, res) {
       completion?.choices?.[0]?.message?.content?.trim() ||
       "Silence is golden. Your to-do list? Less so.";
 
-    // Cache result for a day at the CDN so the snark only updates daily
-    res.setHeader("Cache-Control", "s-maxage=86400, stale-while-revalidate=3600");
-    res.status(200).json({ snark, generated_at: new Date().toISOString() });
+// No caching at all — new line every request
+res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+res.setHeader("Pragma", "no-cache");
+
   } catch (err) {
     res.status(200).json({
       snark: "Error fetching snark. Consider this a judgment-free buffer.",
