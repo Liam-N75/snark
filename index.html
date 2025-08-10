@@ -4,59 +4,44 @@
   <meta charset="UTF-8" />
   <title>Daily Snark</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Hint to Notion/UA about dark+light support -->
   <meta name="color-scheme" content="dark light" />
   <style>
-    /* Make background transparent no matter what */
     html, body {
       height: 100%;
       margin: 0;
-      background: transparent !important;
+      background: transparent !important; /* show Notion’s own background */
     }
-    /* Use Notion's text color, no card background */
     body {
-      color: inherit;
+      color: inherit; /* use Notion’s text color */
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif;
       display: grid;
       place-items: center;
+      padding: 0 8px;
     }
-    /* Subtle vertical rule that adapts to theme */
-    .line {
-      border-left: 3px solid currentColor;
-      opacity: .35;
-      padding-left: 12px;
-    }
-    .snark { font-size: 1.05rem; line-height: 1.45; }
-    .meta  { font-size: .85rem; opacity: .6; margin-top: .3rem; }
-
-    /* Prefer dark-friendly contrast if the host is dark */
-    @media (prefers-color-scheme: dark) {
-      .line { opacity: .45; }
-      .meta { opacity: .7; }
-    }
+    /* Pure text, no card, no border, so it blends perfectly */
+    .snark { font-size: 1.05rem; line-height: 1.45; text-wrap: pretty; }
   </style>
 </head>
 <body>
-  <div class="line">
-    <div id="snark" class="snark">Loading daily snark…</div>
-    <div id="meta" class="meta"></div>
-  </div>
+  <div id="snark" class="snark">Loading…</div>
 
   <script>
-    fetch('/api/snark', { cache: 'no-store' })
+    // Bust any caching so it updates every time you open Notion
+    const url = '/api/snark?t=' + Date.now();
+    fetch(url, { cache: 'no-store' })
       .then(r => r.json())
       .then(data => {
-        document.getElementById('snark').textContent = data.snark || '…no snark today? how productive.';
-        if (data.generated_at) {
-          document.getElementById('meta').textContent = `Updated ${new Date(data.generated_at).toLocaleString()}`;
-        }
+        document.getElementById('snark').textContent =
+          data.snark || "…no snark today? how productive.";
       })
       .catch(() => {
-        document.getElementById('snark').textContent = "Snark failed to load. Assume it's judging.";
+        document.getElementById('snark').textContent =
+          "Snark failed to load. Assume it's judging.";
       });
   </script>
 </body>
 </html>
+
 
 
 
