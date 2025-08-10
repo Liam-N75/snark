@@ -23,7 +23,8 @@ function parseClassMap() {
     .map(pair => {
       const [checkbox, textProp] = pair.split(":").map(s => (s || "").trim());
       if (!checkbox || !textProp) return null;
-      return { checkbox, textProp };
+      // Replace underscores with spaces so env vars can avoid literal spaces
+      return { checkbox: checkbox.replace(/_/g, " "), textProp: textProp.replace(/_/g, " ") };
     })
     .filter(Boolean);
 }
