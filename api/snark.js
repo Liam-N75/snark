@@ -1,18 +1,19 @@
 // api/snark.js
-// GPT-5 companion: Notion-aware quips with retries + explicit error returns (no canned fallbacks).
+// Notion-aware quip bot using a lighter model (default gpt-4o-mini) with retries + explicit error output.
 //
-// ENV VARS required (Vercel → Project → Settings → Environment Variables):
+// REQUIRED ENV VARS (Vercel → Project → Settings → Environment Variables)
 // - OPENAI_API_KEY
 // - NOTION_TOKEN
 // - NOTION_DB_ID
-// Recommended:
+// RECOMMENDED
+// - OPENAI_MODEL           (default: "gpt-4o-mini"; set to your model string if different)
 // - NOTION_TITLE_PROP = "Classes:"
 // - NOTION_DUE_PROP   = "Date"
 // - NOTION_CLASS_MAP  = "S-A:NYP_1,C-A:Conflict_of_Laws,E-A:Evidence,SC-A:State_and_Local_Tax,N-A:Supreme_Court_Watch"
 //   (underscores become spaces)
 
 const NOTION_VERSION = "2022-06-28";
-const OPENAI_MODEL = "gpt-5"; // locked to GPT-5
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const TIMEOUT_MS = 9000;
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -185,7 +186,7 @@ export default async function handler(req, res) {
   try {
     const ctx = await fetchContextFromNotion();
 
-    // Build compact context string (simple, model-friendly)
+    // Build compact context string
     const parts = [];
     for (const { className, items } of ctx.perClass) {
       const shortList = items.slice(0, 2).map(it => {
@@ -208,7 +209,7 @@ export default async function handler(req, res) {
       "Prefer referencing at most one class or assignment name if provided in context."
     ].join(" ");
 
-    // Always try GPT-5 (even with sparse context)
+    // Always try the model (even with sparse context)
     const { snark, error: openai_error, attempts } = await callOpenAI({ system, context });
 
     // Always fresh for the Notion widget
@@ -229,7 +230,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // NO CANNED RESPONSES — if OpenAI failed, return the error so you see it in Notion
+    // If OpenAI failed, return the actual error (no canned lines)
     if (!snark) {
       const msg = openai_error || "OpenAI returned no content.";
       return res.status(500).json({
@@ -247,3 +248,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: `Server error: ${String(e)}` });
   }
 }
+
