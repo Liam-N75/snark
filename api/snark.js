@@ -202,11 +202,12 @@ export default async function handler(req, res) {
       "Progress noted. Procrastination still the fan favorite."
     ];
 
-    if (!snark) {
-      origin = ctx.perClass.length ? "fallback_with_context" : "fallback_no_context";
-      const pool = ctx.perClass.length ? FallbacksWithCtx : FallbacksNoCtx;
-      snark = pool[Math.floor(Math.random() * pool.length)];
-    }
+  if (!snark) {
+  origin = ctx.perClass.length ? "fallback_with_context" : "fallback_no_context";
+  const pool = ctx.perClass.length ? FallbacksWithCtx : FallbacksNoCtx;
+  snark = pool[Math.floor(Math.random() * pool.length)];
+}
+
 
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     res.setHeader("Pragma", "no-cache");
