@@ -1,13 +1,6 @@
 // api/snark.js
-// Notion-aware snark for per-class assignments.
-// - Map checkboxes to class text columns via NOTION_CLASS_MAP like:
-//   S-A:NYP_1,C-A:Conflict_of_Laws,E-A:Evidence,SC-A:State_and_Local_Tax,N-A:Supreme_Court_Watch
-//   (underscores become spaces)
-// - Title fallback via NOTION_TITLE_PROP (e.g., "Classes:")
-// - Due date via NOTION_DUE_PROP (e.g., "Date")
-
 const NOTION_VERSION = "2022-06-28";
-const TIMEOUT_MS = 6000;
+const TIMEOUT_MS = 9000;
 
 function withTimeout(promise, ms = TIMEOUT_MS) {
   return Promise.race([
@@ -16,7 +9,6 @@ function withTimeout(promise, ms = TIMEOUT_MS) {
   ]);
 }
 
-// Parse NOTION_CLASS_MAP -> [{ checkbox, textProp }]
 function parseClassMap() {
   const raw = process.env.NOTION_CLASS_MAP || "";
   return raw
@@ -26,7 +18,6 @@ function parseClassMap() {
     .map(pair => {
       const [checkbox, textProp] = pair.split(":").map(s => (s || "").trim());
       if (!checkbox || !textProp) return null;
-      // underscores -> spaces so env values are easy to type
       return {
         checkbox: checkbox.replace(/_/g, " "),
         textProp: textProp.replace(/_/g, " "),
@@ -37,17 +28,14 @@ function parseClassMap() {
 
 async function notionQuery(dbId, headers, body) {
   const url = `https://api.notion.com/v1/databases/${dbId}/query`;
-  return withTimeout(fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  })).then(r => r.json());
+  return withTimeout(fetch(url, { method: "POST", headers, body: JSON.stringify(body) }))
+    .then(r => r.json());
 }
 
 async function fetchContextFromNotion() {
   const token = process.env.NOTION_TOKEN;
   const dbId = process.env.NOTION_DB_ID;
-  if (!token || !dbId) return { perClass: [], doneApprox: 0 };
+  if (!token || !dbId) return { perClass: [], doneApprox: 0, reason: "missing_notion_env" };
 
   const headers = {
     "Authorization": `Bearer ${token}`,
@@ -59,13 +47,11 @@ async function fetchContextFromNotion() {
   const TITLE = process.env.NOTION_TITLE_PROP || "Name";
   const classMap = parseClassMap();
 
-  // Approx "done" = any row where any mapped checkbox is true (sample up to 100)
   let doneApprox = 0;
   if (classMap.length) {
     const orFilter = classMap.length === 1
       ? { property: classMap[0].checkbox, checkbox: { equals: true } }
       : { or: classMap.map(({ checkbox }) => ({ property: checkbox, checkbox: { equals: true } })) };
-
     try {
       const doneResp = await notionQuery(dbId, headers, { filter: orFilter, page_size: 100 });
       if (doneResp && doneResp.object !== "error") {
@@ -74,7 +60,6 @@ async function fetchContextFromNotion() {
     } catch { /* ignore */ }
   }
 
-  // Per-class pending: checkbox false (don’t require class rich_text non-empty; we’ll fallback to Title)
   const perClass = [];
   for (const { checkbox, textProp } of classMap) {
     try {
@@ -87,21 +72,18 @@ async function fetchContextFromNotion() {
       if (!pendingResp || pendingResp.object === "error") continue;
 
       const items = (pendingResp.results || []).map(page => {
-        // Prefer the class rich_text column
         const rt = page.properties?.[textProp]?.rich_text || [];
         let name = rt.map(t => t.plain_text).join("").trim();
 
-        // Fallback to the Title property if class text is empty
         if (!name) {
           const titleArr = page.properties?.[TITLE]?.title || [];
           name = titleArr.map(t => t.plain_text).join("").trim();
         }
         if (!name) name = "Untitled";
 
-        // Optional due date
         let dueIso = null;
-        const due = page.properties?.[DUE];
-        if (due?.type === "date" && due.date?.start) dueIso = due.date.start;
+        const dueProp = page.properties?.[DUE];
+        if (dueProp?.type === "date" && dueProp.date?.start) dueIso = dueProp.date.start;
 
         return { name, dueIso };
       });
@@ -110,66 +92,95 @@ async function fetchContextFromNotion() {
     } catch { /* ignore */ }
   }
 
-  return { perClass, doneApprox };
+  return {
+    perClass,
+    doneApprox,
+    reason: perClass.length ? "ok" : "notion_empty_or_mismatch"
+  };
 }
 
 export default async function handler(req, res) {
-  try {
-    const { perClass, doneApprox } = await fetchContextFromNotion();
+  const url = new URL(req.url, "http://x"); // dummy base for parsing
+  const debug = url.searchParams.get("debug") === "1";
 
-    // Build compact context for the model
+  try {
+    const ctx = await fetchContextFromNotion();
+
+    // Build compact context
     const parts = [];
-    for (const { className, items } of perClass) {
+    for (const { className, items } of ctx.perClass) {
       const shortList = items.slice(0, 2).map(it => {
         if (!it.dueIso) return it.name;
-        // shorten ISO date a bit (YYYY-MM-DD)
-        const d = it.dueIso.slice(0, 10);
-        return `${it.name} (due ${d})`;
+        return `${it.name} (due ${it.dueIso.slice(0,10)})`;
       }).join("; ");
       parts.push(`${className}: ${shortList}`);
     }
-
     const context = parts.length
-      ? `Done approx: ${doneApprox}. Pending by class → ${parts.join(" | ")}`
+      ? `Done approx: ${ctx.doneApprox}. Pending by class → ${parts.join(" | ")}`
       : `No pending items found or mapping empty.`;
 
-    const system = [
-      "Return ONE short, clever, slightly snarky remark (<= 20 words).",
-      "Prefer productivity roasts when pending tasks exist; otherwise a witty world observation.",
-      "Be witty, not mean. No profanity. No personal data.",
-      "If context lists classes/assignments, you may reference one class or one short assignment name."
-    ].join(" ");
+    // Random nonce nudges variety without changing meaning
+    const nonce = Math.random().toString(36).slice(2, 8);
 
-    const user = `Context: ${context} Generate the remark now.`;
+    // Call OpenAI
+    let origin = "openai";
+    let snark = null;
+    try {
+      const completion = await withTimeout(fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-5",
+          temperature: 1.0,
+          presence_penalty: 0.4,
+          frequency_penalty: 0.6,
+          max_tokens: 40,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "Return ONE short, clever, slightly snarky remark (<= 20 words).",
+                "Prefer productivity roasts when pending tasks exist; otherwise a witty world observation.",
+                "Be witty, not mean. No profanity. No personal data.",
+                "If context lists classes/assignments, you may reference one class or one short assignment name."
+              ].join(" ")
+            },
+            { role: "user", content: `Context: ${context}\n(variation:${nonce}) Generate the remark now.` }
+          ]
+        }),
+      })).then(r => r.json());
 
-    // OpenAI call
-    const completion = await withTimeout(fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-5",
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        temperature: 0.9,
-        max_tokens: 40,
-      }),
-    })).then(r => r.json()).catch(() => null);
+      snark = completion?.choices?.[0]?.message?.content?.trim() || null;
+    } catch {
+      snark = null;
+    }
 
-    const snark =
-      completion?.choices?.[0]?.message?.content?.trim()
-      || (perClass.length ? "Assignments multiplying; checkboxes napping. Classic." : "Universe vast; your to-do list vaster.");
+    if (!snark) {
+      origin = ctx.perClass.length ? "fallback_with_context" : "fallback_no_context";
+      snark = ctx.perClass.length
+        ? "Assignments multiplying; checkboxes napping. Classic."
+        : "Universe vast; your to-do list vaster.";
+    }
 
-    // Always fresh for the Notion widget
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     res.setHeader("Pragma", "no-cache");
-    res.status(200).json({ snark });
-  } catch {
+
+    if (debug) {
+      return res.status(200).json({
+        origin,
+        reason: ctx.reason,
+        context_used: context,
+        class_map: parseClassMap(),
+        snark
+      });
+    }
+
+    return res.status(200).json({ snark });
+  } catch (e) {
     res.setHeader("Cache-Control", "no-store");
-    res.status(200).json({ snark: "APIs moody. Consider this a mercy recess." });
+    return res.status(200).json({ snark: "APIs moody. Consider this a mercy recess." });
   }
 }
