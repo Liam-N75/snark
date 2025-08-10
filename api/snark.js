@@ -1,22 +1,10 @@
 // api/snark.js
-// Notion-aware snark with robust fallbacks, variety, and debug mode.
-//
-// ENV VARS (Vercel -> Project -> Settings -> Environment Variables):
-// - OPENAI_API_KEY         (required)
-// - OPENAI_MODEL           (optional, default: "gpt-4o-mini")
-// - NOTION_TOKEN           (required for Notion context)
-// - NOTION_DB_ID           (required for Notion context)
-// - NOTION_TITLE_PROP      (optional; e.g., "Classes:" — used as fallback name)
-// - NOTION_DUE_PROP        (optional; e.g., "Date")
-// - NOTION_CLASS_MAP       (optional; mapping "Checkbox:Class_RichText,...", underscores become spaces)
-//     Example: S-A:NYP_1,C-A:Conflict_of_Laws,E-A:Evidence,SC-A:State_and_Local_Tax,N-A:Supreme_Court_Watch
-//
-// Debug: append ?debug=1 to see origin, errors, and context used.
+// Notion-aware snark bot using GPT-5, acting as a witty companion narrating your life and the world.
+// Drops short, clever remarks informed by your assignments and a pinch of daily-world flavor.
 
 const NOTION_VERSION = "2022-06-28";
 const TIMEOUT_MS = 9000;
-
-// --- Helpers ---------------------------------------------------------------
+const OPENAI_MODEL = "gpt-5"; // Locked to GPT-5
 
 function withTimeout(promise, ms = TIMEOUT_MS) {
   return Promise.race([
@@ -25,7 +13,6 @@ function withTimeout(promise, ms = TIMEOUT_MS) {
   ]);
 }
 
-// Parse NOTION_CLASS_MAP -> [{ checkbox, textProp }]
 function parseClassMap() {
   const raw = process.env.NOTION_CLASS_MAP || "";
   return raw
@@ -36,7 +23,6 @@ function parseClassMap() {
       const [checkbox, textProp] = pair.split(":").map(s => (s || "").trim());
       if (!checkbox || !textProp) return null;
       return {
-        // underscores -> spaces for easy typing in env vars
         checkbox: checkbox.replace(/_/g, " "),
         textProp: textProp.replace(/_/g, " "),
       };
@@ -71,7 +57,6 @@ async function fetchContextFromNotion() {
   const TITLE = process.env.NOTION_TITLE_PROP || "Name";
   const classMap = parseClassMap();
 
-  // Approx "done" = any row where any mapped checkbox is true (sample up to 100)
   let doneApprox = 0;
   if (classMap.length) {
     const orFilter = classMap.length === 1
@@ -86,8 +71,6 @@ async function fetchContextFromNotion() {
     } catch { /* ignore */ }
   }
 
-  // Per-class pending: checkbox false (we do NOT require the class rich_text to be non-empty;
-  // we'll fall back to Title when needed)
   const perClass = [];
   for (const { checkbox, textProp } of classMap) {
     try {
@@ -100,18 +83,15 @@ async function fetchContextFromNotion() {
       if (!pendingResp || pendingResp.object === "error") continue;
 
       const items = (pendingResp.results || []).map(page => {
-        // Prefer the class rich_text column for assignment name
         const rt = page.properties?.[textProp]?.rich_text || [];
         let name = rt.map(t => t.plain_text).join("").trim();
 
-        // Fallback to the Title property if class text is empty
         if (!name) {
           const titleArr = page.properties?.[TITLE]?.title || [];
           name = titleArr.map(t => t.plain_text).join("").trim();
         }
-        // Final fallback label if everything's blank
         if (!name) {
-          name = textProp; // e.g., "Evidence"
+          name = textProp;
           const dueProp = page.properties?.[DUE];
           if (dueProp?.type === "date" && dueProp.date?.start) {
             name += ` assignment (${dueProp.date.start.slice(0,10)})`;
@@ -120,7 +100,6 @@ async function fetchContextFromNotion() {
           }
         }
 
-        // Optional due date
         let dueIso = null;
         const due = page.properties?.[DUE];
         if (due?.type === "date" && due.date?.start) dueIso = due.date.start;
@@ -139,17 +118,13 @@ async function fetchContextFromNotion() {
   };
 }
 
-// --- Main handler ----------------------------------------------------------
-
 export default async function handler(req, res) {
-  // Parse ?debug=1 safely (Node runtime)
   const url = new URL(req.url, "http://localhost");
   const debug = url.searchParams.get("debug") === "1";
 
   try {
     const ctx = await fetchContextFromNotion();
 
-    // Build compact context text for the model
     const parts = [];
     for (const { className, items } of ctx.perClass) {
       const shortList = items.slice(0, 2).map(it => {
@@ -162,11 +137,8 @@ export default async function handler(req, res) {
       ? `Done approx: ${ctx.doneApprox}. Pending by class → ${parts.join(" | ")}`
       : `No pending items found or mapping empty.`;
 
-    // Inject a nonce to subtly nudge variety without changing meaning
     const nonce = Math.random().toString(36).slice(2, 8);
 
-    // OpenAI call with variety settings
-    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
     let origin = "openai";
     let snark = null;
     let openai_error = null;
@@ -179,7 +151,7 @@ export default async function handler(req, res) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model,
+          model: OPENAI_MODEL,
           temperature: 1.05,
           presence_penalty: 0.4,
           frequency_penalty: 0.6,
@@ -189,10 +161,15 @@ export default async function handler(req, res) {
             {
               role: "system",
               content: [
-                "Return ONE short, clever, slightly snarky remark (<= 20 words).",
-                "Prefer productivity roasts when pending tasks exist; otherwise a witty world observation.",
-                "Be witty, not mean. No profanity. No personal data.",
-                "If context lists classes/assignments, you may reference one class or one short assignment name."
+                "You are a witty, observant, slightly snarky companion — a little voice on the user's shoulder.",
+                "You see their daily assignments and the general state of the world, and you comment in one short remark (<= 20 words).",
+                "Sometimes you roast their workload (especially if something is due soon), sometimes you comfort them, sometimes you make a wry observation about life or the news.",
+                "Examples:",
+                "- 'Three assignments due tomorrow? Light work.'",
+                "- 'Hang in there, it's almost Friday.'",
+                "- 'Hey, might wanna check your Evidence assignments, just sayin'.'",
+                "Your tone is playful, clever, human, and varied. Never mean, never profane.",
+                "If there are no assignments, lean more into commentary about the day, week, or the world at large."
               ].join(" ")
             },
             { role: "user", content: `Context: ${context}\n(variation:${nonce}) Generate the remark now.` }
@@ -214,7 +191,6 @@ export default async function handler(req, res) {
       openai_error = String(e);
     }
 
-    // Randomized fallbacks so it doesn't feel stuck during errors
     const FallbacksNoCtx = [
       "Universe vast; your to-do list vaster.",
       "New tab opened. Productivity achieved… allegedly.",
@@ -232,7 +208,6 @@ export default async function handler(req, res) {
       snark = pool[Math.floor(Math.random() * pool.length)];
     }
 
-    // Always fresh for the Notion widget
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     res.setHeader("Pragma", "no-cache");
 
@@ -241,7 +216,7 @@ export default async function handler(req, res) {
         origin,
         reason: ctx.reason,
         openai_error,
-        model,
+        model: OPENAI_MODEL,
         context_used: context,
         class_map: parseClassMap(),
         snark
@@ -250,7 +225,6 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ snark });
   } catch (e) {
-    // Final safety net
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json({ snark: "APIs moody. Consider this a mercy recess." });
   }
