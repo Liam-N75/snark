@@ -1,7 +1,7 @@
 // api/snark.js
-// GPT-5 companion: Notion-aware quips with robust retries + debug.
+// GPT-5 companion: Notion-aware quips with retries + explicit error returns (no canned fallbacks).
 //
-// ENV VARS required:
+// ENV VARS required (Vercel → Project → Settings → Environment Variables):
 // - OPENAI_API_KEY
 // - NOTION_TOKEN
 // - NOTION_DB_ID
@@ -15,7 +15,7 @@ const NOTION_VERSION = "2022-06-28";
 const OPENAI_MODEL = "gpt-5"; // locked to GPT-5
 const TIMEOUT_MS = 9000;
 
-function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function withTimeout(promise, ms = TIMEOUT_MS) {
   return Promise.race([
@@ -28,10 +28,10 @@ function parseClassMap() {
   const raw = process.env.NOTION_CLASS_MAP || "";
   return raw
     .split(",")
-    .map((pair) => pair.trim())
+    .map(pair => pair.trim())
     .filter(Boolean)
-    .map((pair) => {
-      const [checkbox, textProp] = pair.split(":").map((s) => (s || "").trim());
+    .map(pair => {
+      const [checkbox, textProp] = pair.split(":").map(s => (s || "").trim());
       if (!checkbox || !textProp) return null;
       return {
         checkbox: checkbox.replace(/_/g, " "),
@@ -43,9 +43,11 @@ function parseClassMap() {
 
 async function notionQuery(dbId, headers, body) {
   const url = `https://api.notion.com/v1/databases/${dbId}/query`;
-  const res = await withTimeout(
-    fetch(url, { method: "POST", headers, body: JSON.stringify(body) })
-  );
+  const res = await withTimeout(fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  }));
   return res.json();
 }
 
@@ -69,24 +71,16 @@ async function fetchContextFromNotion() {
   // Approx done = any mapped checkbox true (sample up to 100)
   let doneApprox = 0;
   if (classMap.length) {
-    const orFilter =
-      classMap.length === 1
-        ? { property: classMap[0].checkbox, checkbox: { equals: true } }
-        : {
-            or: classMap.map(({ checkbox }) => ({
-              property: checkbox,
-              checkbox: { equals: true },
-            })),
-          };
+    const orFilter = classMap.length === 1
+      ? { property: classMap[0].checkbox, checkbox: { equals: true } }
+      : { or: classMap.map(({ checkbox }) => ({ property: checkbox, checkbox: { equals: true } })) };
+
     try {
-      const doneResp = await notionQuery(dbId, headers, {
-        filter: orFilter,
-        page_size: 100,
-      });
+      const doneResp = await notionQuery(dbId, headers, { filter: orFilter, page_size: 100 });
       if (doneResp && doneResp.object !== "error") {
         doneApprox = (doneResp.results || []).length;
       }
-    } catch {}
+    } catch { /* ignore */ }
   }
 
   // Pending per class = checkbox false (don’t require rich_text; we’ll fall back to Title)
@@ -101,19 +95,21 @@ async function fetchContextFromNotion() {
       });
       if (!pendingResp || pendingResp.object === "error") continue;
 
-      const items = (pendingResp.results || []).map((page) => {
+      const items = (pendingResp.results || []).map(page => {
         const rt = page.properties?.[textProp]?.rich_text || [];
-        let name = rt.map((t) => t.plain_text).join("").trim();
+        let name = rt.map(t => t.plain_text).join("").trim();
 
+        // Fallback to Title if class text empty
         if (!name) {
           const titleArr = page.properties?.[TITLE]?.title || [];
-          name = titleArr.map((t) => t.plain_text).join("").trim();
+          name = titleArr.map(t => t.plain_text).join("").trim();
         }
+        // Last-resort label if everything blank
         if (!name) {
-          name = textProp; // last-resort label
+          name = textProp; // e.g., "Evidence"
           const dueProp = page.properties?.[DUE];
           if (dueProp?.type === "date" && dueProp.date?.start) {
-            name += ` assignment (${dueProp.date.start.slice(0, 10)})`;
+            name += ` assignment (${dueProp.date.start.slice(0,10)})`;
           } else {
             name += " assignment";
           }
@@ -127,7 +123,7 @@ async function fetchContextFromNotion() {
       });
 
       if (items.length) perClass.push({ className: textProp, items });
-    } catch {}
+    } catch { /* ignore */ }
   }
 
   return {
@@ -156,24 +152,23 @@ async function callOpenAI({ system, context }) {
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const resp = await withTimeout(
-        fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(body),
-        })
-      );
-      const text = await resp.text(); // capture raw for better error surfacing
+      const resp = await withTimeout(fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }));
+
+      const raw = await resp.text(); // capture raw for better error surfacing
       if (!resp.ok) {
-        lastError = `HTTP ${resp.status} ${resp.statusText} :: ${text.slice(0, 200)}`;
+        lastError = `HTTP ${resp.status} ${resp.statusText} :: ${raw.slice(0, 300)}`;
       } else {
-        const json = JSON.parse(text);
+        const json = JSON.parse(raw);
         const out = json?.choices?.[0]?.message?.content?.trim();
         if (out) return { snark: out, error: null, attempts: attempt + 1 };
-        lastError = `Empty completion :: ${text.slice(0, 200)}`;
+        lastError = `Empty completion :: ${raw.slice(0, 300)}`;
       }
     } catch (e) {
       lastError = String(e);
@@ -190,77 +185,65 @@ export default async function handler(req, res) {
   try {
     const ctx = await fetchContextFromNotion();
 
-    // Build compact context string
+    // Build compact context string (simple, model-friendly)
     const parts = [];
     for (const { className, items } of ctx.perClass) {
-      const shortlist = items
-        .slice(0, 2)
-        .map((it) => (it.dueIso ? `${it.name} (due ${it.dueIso.slice(0, 10)})` : it.name))
-        .join("; ");
-      parts.push(`${className}: ${shortlist}`);
+      const shortList = items.slice(0, 2).map(it => {
+        if (!it.dueIso) return it.name;
+        return `${it.name} (due ${it.dueIso.slice(0,10)})`;
+      }).join("; ");
+      parts.push(`${className}: ${shortList}`);
     }
-    const context =
-      parts.length
-        ? `Done approx: ${ctx.doneApprox}. Pending by class → ${parts.join(" | ")}`
-        : `No pending items found or mapping empty.`;
+    const context = parts.length
+      ? `Done approx: ${ctx.doneApprox}. Pending by class → ${parts.join(" | ")}`
+      : `No pending items found or mapping empty.`;
 
-    // Friendly, present “voice on your shoulder”
+    // Voice + style
     const system = [
       "You are a witty, observant, slightly snarky companion — a little voice on the user's shoulder.",
       "You see their daily assignments and the general state of the world, and you comment in ONE short line (<= 20 words).",
       "Sometimes you roast their workload (esp. if something is due soon). Sometimes you comfort them. Sometimes a wry observation about life/news.",
       "Examples: \"Three assignments due tomorrow? Light work.\" \"Hang in there, it's almost Friday.\" \"Hey, maybe check Evidence, just sayin'.\"",
-      "Tone: playful, clever, human, varied. Never mean. No profanity. Avoid revealing sensitive details.",
-      "Prefer referencing at most one class or assignment name if provided in context.",
+      "Tone: playful, clever, human, varied. Never mean. No profanity. Avoid sensitive details.",
+      "Prefer referencing at most one class or assignment name if provided in context."
     ].join(" ");
 
-    // Always attempt GPT-5 (even if context is bare)
+    // Always try GPT-5 (even with sparse context)
     const { snark, error: openai_error, attempts } = await callOpenAI({ system, context });
-
-    // Rotating fallbacks if OpenAI fails
-    const FallbacksNoCtx = [
-      "Universe vast; your to-do list vaster.",
-      "New tab opened. Productivity achieved… allegedly.",
-      "Today’s forecast: 90% chance of postponement.",
-      "Momentum acquired. Direction… negotiable.",
-    ];
-    const FallbacksWithCtx = [
-      "Assignments multiplying; checkboxes napping. Classic.",
-      "Your tasks are social—they prefer groups.",
-      "Progress noted. Procrastination still the fan favorite.",
-      "Deadlines circling like very punctual vultures.",
-    ];
-
-    let origin = "openai";
-    let line = snark;
-    if (!line) {
-      origin = ctx.perClass.length ? "fallback_with_context" : "fallback_no_context";
-      const pool = ctx.perClass.length ? FallbacksWithCtx : FallbacksNoCtx;
-      line = pool[Math.floor(Math.random() * pool.length)];
-    }
 
     // Always fresh for the Notion widget
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     res.setHeader("Pragma", "no-cache");
 
+    // Debug mode: show everything
     if (debug) {
       return res.status(200).json({
-        origin,
+        origin: snark ? "openai" : "error",
         reason: ctx.reason,
         openai_attempts: attempts,
         openai_error,
         model: OPENAI_MODEL,
         context_used: context,
         class_map: parseClassMap(),
-        snark: line,
+        snark: snark || null
       });
     }
 
-    return res.status(200).json({ snark: line });
+    // NO CANNED RESPONSES — if OpenAI failed, return the error so you see it in Notion
+    if (!snark) {
+      const msg = openai_error || "OpenAI returned no content.";
+      return res.status(500).json({
+        error: `OpenAI error: ${msg}`,
+        model: OPENAI_MODEL,
+        reason: ctx.reason,
+        context_used: context
+      });
+    }
+
+    // Success
+    return res.status(200).json({ snark });
   } catch (e) {
     res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({ snark: "APIs moody. Consider this a mercy recess." });
+    return res.status(500).json({ error: `Server error: ${String(e)}` });
   }
 }
-
-
